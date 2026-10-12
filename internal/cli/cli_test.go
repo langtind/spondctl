@@ -205,7 +205,7 @@ func TestEventsAreTheUpcomingOnesInOrder(t *testing.T) {
 
 	// Today starts at midnight in the user's zone, which is 22:00 UTC the day before.
 	q := h.calls[0].Query
-	if h.sent() != "GET /sponds/" || q.Get("minEndTimestamp") != "2026-10-11T22:00:00.000Z" || q.Get("max") != "21" || q.Get("scheduled") != "false" || q.Has("maxStartTimestamp") || q.Has("groupId") {
+	if h.sent() != "GET /sponds/" || q.Get("minEndTimestamp") != "2026-10-11T22:00:00.000Z" || q.Get("max") != "21" || q.Get("scheduled") != "false" || q.Get("order") != "asc" || q.Has("maxStartTimestamp") || q.Has("groupId") {
 		t.Errorf("sent = %s, query = %v", h.sent(), q)
 	}
 }

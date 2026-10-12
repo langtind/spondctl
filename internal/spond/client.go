@@ -137,9 +137,10 @@ type EventQuery struct {
 	Max          int
 }
 
-// Events lists events. The order is the one the service chose.
+// Events lists events, the earliest first. Without "order" the service
+// answers the latest first, and Max would then cut off the nearest ones.
 func (c *Client) Events(ctx context.Context, q EventQuery) ([]Event, error) {
-	query := url.Values{"max": {strconv.Itoa(q.Max)}, "scheduled": {"false"}}
+	query := url.Values{"max": {strconv.Itoa(q.Max)}, "scheduled": {"false"}, "order": {"asc"}}
 	if q.GroupID != "" {
 		query.Set("groupId", q.GroupID)
 	}

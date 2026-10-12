@@ -31,6 +31,8 @@ Checked on 2026-10-12 with a real account. Only the shape is written down:
 
 An event answers with these fields: `attachments`, `autoAccept`, `autoReminderType`, `behalfOfIds`, `comments`, `commentsDisabled`, `createdTime`, `creatorId`, `description`, `endTimestamp`, `expired`, `heading`, `hidden`, `id`, `location`, `matchEvent`, `owners`, `participantsHidden`, `picture`, `recipients`, `registered`, `responses`, `startTimestamp`, `tasks`, `type`, `updated`, `visibility`.
 
+`GET /sponds/` answers the latest event first. With `order=asc` it answers the earliest first, and `order=desc` is the same as leaving it out. This matters with `max`: without `order=asc`, the events that are cut off are the nearest ones.
+
 - `responses` has the five id lists and also `participantIds`.
 - `location` has `id`, `feature`, `address`, `postalCode`, `country`, `latitude`, `longitude`, `administrativeAreaLevel1` and `administrativeAreaLevel2`.
 - `recipients` has `group`, `guardians` and `profiles`.
@@ -56,7 +58,6 @@ Not used by spondctl, and listed so that nobody has to look again: `GET /profile
 
 What the client assumes without having seen it:
 
-- The order of `GET /sponds/`. spondctl sorts by start time itself.
 - That `max` has no lower ceiling than 100.
 - That every invited member is in one of the five id lists. `respond` only notes it when a member is in none.
 - How long a token lasts. There is no known way to renew one.

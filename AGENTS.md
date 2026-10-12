@@ -43,6 +43,7 @@ spondctl is a Go CLI for Spond, the app that sports teams and other groups use f
 - A member id belongs to a group. It is not the id of the profile that logged in. A parent answers for a child with the child's member id.
 - `accepted` in the answer body is the text `"true"` or `"false"`.
 - An attachment has an address under `https://spond.com/storage/`, and the file is served without a token. `Client.Download` fetches nothing outside that origin and never sends the token, because the address is data from the service.
+- `GET /sponds/` answers the latest event first unless `order=asc` is sent. The client always sends it.
 - A token cannot be renewed. On 401 the user logs in again, and `hint` in `cli.go` says so.
 - An account with two-factor login gets a login answer without a token. That answer can hold a phone number, so it is never printed.
 - Dates on the command line are read in the user's time zone. Markdown shows times in that zone, JSON keeps them as Spond gave them.
