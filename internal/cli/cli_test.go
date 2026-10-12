@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,15 @@ const (
 	matchBody = `{"id":"E2","heading":"Kamp","cancelled":true,
 	  "startTimestamp":"2026-10-17T10:00:00Z","endTimestamp":"2026-10-17T12:00:00Z",
 	  "responses":{"acceptedIds":[],"declinedIds":["M2"],"unansweredIds":["M1"],"waitinglistIds":["M9"],"unconfirmedIds":[]}}`
+
+	// {origin} becomes the address of the fake service.
+	concertBody = `{"id":"E3","heading":"Konsert","startTimestamp":"2026-10-15T08:00:00Z","endTimestamp":"2026-10-15T12:00:00Z",
+	  "attachments":[
+	    {"id":"A1","title":"Søknad om fri","media":"{origin}/storage/upload/X1/S%C3%B8knad_om_fri.pdf","type":2,"timestamp":"2026-10-06T11:22:06.343Z"},
+	    {"id":"A2","title":"Elsewhere","media":"https://files.example.invalid/storage/evil.pdf"},
+	    {"id":"A3","title":"Climbing","media":"{origin}/storage/upload/X1/.."}
+	  ],
+	  "responses":{"acceptedIds":["M1"],"declinedIds":[],"unansweredIds":[],"waitinglistIds":[],"unconfirmedIds":[]}}`
 
 	afterAccept = `{"acceptedIds":["M2","M1"],"declinedIds":[],"unansweredIds":[],"waitinglistIds":[],"unconfirmedIds":[]}`
 )
@@ -81,6 +91,10 @@ func newHarness(t *testing.T) *harness {
 			return http.StatusOK, "[" + matchBody + "," + trainingBody + "]"
 		case c.Method == http.MethodGet && c.Path == "/sponds/E1":
 			return http.StatusOK, trainingBody
+		case c.Method == http.MethodGet && c.Path == "/sponds/E3":
+			return http.StatusOK, concertBody
+		case c.Method == http.MethodGet && c.Path == "/storage/upload/X1/Søknad_om_fri.pdf":
+			return http.StatusOK, "%PDF-1.4 made up"
 		case c.Method == http.MethodPut && c.Path == "/sponds/E1/responses/M1":
 			return http.StatusOK, afterAccept
 		}
@@ -93,7 +107,7 @@ func newHarness(t *testing.T) *harness {
 // server too, which is what the contract test needs.
 func (h *harness) program(baseURL string, client *http.Client) *ctlkit.Program {
 	app := &App{
-		Client: &spond.Client{HTTP: client, BaseURL: baseURL},
+		Client: &spond.Client{HTTP: client, BaseURL: baseURL, MediaOrigin: baseURL},
 		Tokens: h.tokens,
 		Getenv: func(name string) string { return h.env[name] },
 		Now:    func() time.Time { return testTime },
@@ -105,6 +119,7 @@ func (h *harness) program(baseURL string, client *http.Client) *ctlkit.Program {
 func (h *harness) run(stdin string, args ...string) (code int, stdout, stderr string) {
 	h.t.Helper()
 	h.calls = nil
+	var origin string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		c := call{
@@ -120,9 +135,10 @@ func (h *harness) run(stdin string, args ...string) (code int, stdout, stderr st
 		h.calls = append(h.calls, c)
 		status, answer := h.answer(c)
 		w.WriteHeader(status)
-		fmt.Fprint(w, answer)
+		fmt.Fprint(w, strings.ReplaceAll(answer, "{origin}", origin))
 	}))
 	defer srv.Close()
+	origin = srv.URL
 	return ctltest.Run(h.program(srv.URL, srv.Client()), stdin, args...)
 }
 
@@ -269,6 +285,78 @@ func TestAnUnknownEventIsNotFound(t *testing.T) {
 	ctltest.OneJSON(t, stdout, &doc)
 	if code != 3 || doc.Error.Kind != "not_found" || doc.Error.Message != "Spond: HTTP 404: Not found" || doc.Error.Hint != `run "spondctl events" to see the ids.` {
 		t.Errorf("exit = %d, error = %+v", code, doc.Error)
+	}
+}
+
+func TestEventListsItsAttachments(t *testing.T) {
+	h := newHarness(t)
+	_, stdout, _ := h.run("", "event", "E3")
+	if !strings.Contains(stdout, "\n## Attachments\n\n- Søknad om fri (id A1)\n- Elsewhere (id A2)\n- Climbing (id A3)\n\n## Answers\n") {
+		t.Errorf("stdout:\n%s", stdout)
+	}
+
+	_, stdout, _ = h.run("", "event", "E1", "--json", "--fields", "attachments")
+	if got := strings.Join(strings.Fields(stdout), ""); got != `{"attachments":[]}` {
+		t.Errorf("an event without attachments: %s", got)
+	}
+
+	_, stdout, _ = h.run("", "event", "E3", "--raw")
+	var raw map[string]any
+	ctltest.OneJSON(t, stdout, &raw)
+	if raw["heading"] != "Konsert" || len(raw["attachments"].([]any)) != 3 {
+		t.Errorf("--raw = %v", raw)
+	}
+}
+
+func TestAttachmentIsDownloadedWithoutTheToken(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	code, stdout, stderr := h.run("", "attachment", "E3", "A1", "--out", dir, "--json")
+	var result attachmentResult
+	ctltest.OneJSON(t, stdout, &result)
+	want := filepath.Join(dir, "Søknad_om_fri.pdf")
+	if code != 0 || result.Path != want || result.Bytes != 16 || result.Title != "Søknad om fri" {
+		t.Fatalf("exit = %d, stderr = %q, result = %+v", code, stderr, result)
+	}
+	if data, err := os.ReadFile(want); err != nil || string(data) != "%PDF-1.4 made up" {
+		t.Errorf("file = %q, %v", data, err)
+	}
+	if download := h.calls[len(h.calls)-1]; h.sent() != "GET /sponds/E3, GET /storage/upload/X1/Søknad_om_fri.pdf" || download.Token != "" {
+		t.Errorf("sent = %s, token on the download = %q", h.sent(), download.Token)
+	}
+
+	// The file is there now, so a second run needs --replace.
+	code, _, stderr = h.run("", "attachment", "E3", "A1", "--out", dir)
+	if code != 5 || !strings.Contains(stderr, "is already there") || h.sent() != "GET /sponds/E3" {
+		t.Errorf("second run: exit = %d, stderr = %q, sent = %s", code, stderr, h.sent())
+	}
+	if code, _, _ := h.run("", "attachment", "E3", "A1", "--out", dir, "--replace"); code != 0 {
+		t.Errorf("with --replace: exit = %d", code)
+	}
+
+	named := filepath.Join(dir, "fri.pdf")
+	if code, stdout, _ := h.run("", "attachment", "E3", "A1", "--out", named); code != 0 || !strings.Contains(stdout, named) {
+		t.Errorf("--out with a file name: exit = %d, stdout = %q", code, stdout)
+	}
+}
+
+func TestAttachmentFetchesOnlyFromSpond(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	code, _, stderr := h.run("", "attachment", "E3", "A2", "--out", dir)
+	if code != 1 || !strings.Contains(stderr, `"https://files.example.invalid/storage/evil.pdf", which is not under`) || h.sent() != "GET /sponds/E3" {
+		t.Errorf("another origin: exit = %d, stderr = %q, sent = %s", code, stderr, h.sent())
+	}
+
+	// A name that climbs out of the directory is not used.
+	h.run("", "attachment", "E3", "A3", "--out", dir)
+	if entries, _ := os.ReadDir(filepath.Dir(dir)); len(entries) != 1 {
+		t.Errorf("something was written beside the directory: %v", entries)
+	}
+
+	code, _, stderr = h.run("", "attachment", "E3", "A9", "--out", dir)
+	if code != 3 || !strings.Contains(stderr, `the event "Konsert" has no attachment with the id "A9"`) || !strings.Contains(stderr, `run "spondctl event E3" to see the 3 it has.`) {
+		t.Errorf("unknown attachment: exit = %d, stderr = %q", code, stderr)
 	}
 }
 

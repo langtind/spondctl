@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -68,8 +71,26 @@ func (a *App) commands() []ctlkit.Command {
 			Name:    "event",
 			Summary: "Show one event and who has answered what",
 			Args:    []ctlkit.Arg{{Name: "event-id", Required: true, ID: true, Help: "the id, as events prints it"}},
-			Flags:   []ctlkit.Flag{ctlkit.JSONFlag, ctlkit.FieldsFlag},
-			Run:     a.event,
+			Flags: []ctlkit.Flag{
+				ctlkit.JSONFlag,
+				ctlkit.FieldsFlag,
+				{Name: "raw", Kind: ctlkit.Bool, Help: "write the answer from Spond to stdout as it came, with everything in it"},
+			},
+			Run: a.event,
+		},
+		{
+			Name:    "attachment",
+			Summary: "Download a file that is attached to an event",
+			Args: []ctlkit.Arg{
+				{Name: "event-id", Required: true, ID: true, Help: "the id, as events prints it"},
+				{Name: "attachment-id", Required: true, ID: true, Help: "the id, as event prints it"},
+			},
+			Flags: []ctlkit.Flag{
+				{Name: "out", Kind: ctlkit.String, Value: "path", Help: "the file to write, or a directory to write it in. Without the flag: the working directory"},
+				{Name: "replace", Kind: ctlkit.Bool, Help: "overwrite a file that is already there"},
+				ctlkit.JSONFlag,
+			},
+			Run: a.attachment,
 		},
 		{
 			Name:    "respond",
@@ -223,6 +244,8 @@ type eventSummary struct {
 	Cancelled bool           `json:"cancelled"`
 	Location  *place         `json:"location,omitempty"`
 	Responses responseCounts `json:"responses"`
+	// Attachments is how many files the event has. event lists them.
+	Attachments int `json:"attachments"`
 }
 
 // eventList is what events prints. Truncated says that Spond has more
@@ -241,14 +264,15 @@ func placeOf(l *spond.Location) *place {
 
 func summarize(e spond.Event) eventSummary {
 	return eventSummary{
-		ID:        e.ID,
-		Heading:   e.Heading,
-		Start:     e.StartTimestamp,
-		End:       e.EndTimestamp,
-		Meetup:    e.MeetupTimestamp,
-		Cancelled: e.Cancelled,
-		Location:  placeOf(e.Location),
-		Responses: count(e.Responses),
+		ID:          e.ID,
+		Heading:     e.Heading,
+		Start:       e.StartTimestamp,
+		End:         e.EndTimestamp,
+		Meetup:      e.MeetupTimestamp,
+		Cancelled:   e.Cancelled,
+		Location:    placeOf(e.Location),
+		Responses:   count(e.Responses),
+		Attachments: len(e.Attachments),
 	}
 }
 
@@ -323,15 +347,23 @@ type answered struct {
 }
 
 type eventView struct {
-	ID          string   `json:"id"`
-	Heading     string   `json:"heading"`
-	Description string   `json:"description,omitempty"`
-	Start       string   `json:"start"`
-	End         string   `json:"end"`
-	Meetup      string   `json:"meetup,omitempty"`
-	Cancelled   bool     `json:"cancelled"`
-	Location    *place   `json:"location,omitempty"`
-	Responses   answered `json:"responses"`
+	ID          string           `json:"id"`
+	Heading     string           `json:"heading"`
+	Description string           `json:"description,omitempty"`
+	Start       string           `json:"start"`
+	End         string           `json:"end"`
+	Meetup      string           `json:"meetup,omitempty"`
+	Cancelled   bool             `json:"cancelled"`
+	Location    *place           `json:"location,omitempty"`
+	Attachments []attachmentView `json:"attachments"`
+	Responses   answered         `json:"responses"`
+}
+
+type attachmentView struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+	Added string `json:"added,omitempty"`
 }
 
 // names maps the id of every member in the account's groups to a name.
@@ -357,6 +389,14 @@ func (a *App) event(ctx context.Context, c *ctlkit.Call) error {
 	if err := a.authorize(); err != nil {
 		return err
 	}
+	if c.Bool("raw") {
+		raw, err := a.Client.EventRaw(ctx, c.Arg(0))
+		if err != nil {
+			return withEventHint(err)
+		}
+		_, err = fmt.Fprintf(c.Stdout, "%s\n", raw)
+		return err
+	}
 	event, err := a.Client.Event(ctx, c.Arg(0))
 	if err != nil {
 		return withEventHint(err)
@@ -377,6 +417,7 @@ func (a *App) event(ctx context.Context, c *ctlkit.Call) error {
 		Meetup:      event.MeetupTimestamp,
 		Cancelled:   event.Cancelled,
 		Location:    placeOf(event.Location),
+		Attachments: []attachmentView{},
 		Responses: answered{
 			Accepted:    people(event.Responses.AcceptedIDs, who),
 			Declined:    people(event.Responses.DeclinedIDs, who),
@@ -385,7 +426,74 @@ func (a *App) event(ctx context.Context, c *ctlkit.Call) error {
 			Unconfirmed: people(event.Responses.UnconfirmedIDs, who),
 		},
 	}
+	for _, file := range event.Attachments {
+		view.Attachments = append(view.Attachments, attachmentView{ID: file.ID, Title: file.Title, URL: file.Media, Added: file.Timestamp})
+	}
 	return c.Print(view, func(w io.Writer) { a.renderEvent(w, view) })
+}
+
+// attachmentResult is what attachment prints.
+type attachmentResult struct {
+	EventID string `json:"eventId"`
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Path    string `json:"path"`
+	Bytes   int    `json:"bytes"`
+}
+
+func (a *App) attachment(ctx context.Context, c *ctlkit.Call) error {
+	if err := a.authorize(); err != nil {
+		return err
+	}
+	event, err := a.Client.Event(ctx, c.Arg(0))
+	if err != nil {
+		return withEventHint(err)
+	}
+	i := slices.IndexFunc(event.Attachments, func(f spond.Attachment) bool { return f.ID == c.Arg(1) })
+	if i < 0 {
+		return ctlkit.NotFoundf("the event %q has no attachment with the id %q", oneLine(event.Heading), c.Arg(1)).
+			WithHint(`run "%s event %s" to see the %d it has.`, Name, event.ID, len(event.Attachments))
+	}
+	file := event.Attachments[i]
+
+	path, err := attachmentPath(c.String("out"), file.Media)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil && !c.Bool("replace") {
+		return ctlkit.Errorf(ctlkit.KindConflict, "%s is already there", path).WithHint("pass --replace to overwrite it, or --out to write somewhere else.")
+	}
+
+	data, err := a.Client.Download(ctx, file.Media)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write the attachment: %w", err)
+	}
+	result := attachmentResult{EventID: event.ID, ID: file.ID, Title: file.Title, Path: path, Bytes: len(data)}
+	return c.Print(result, func(w io.Writer) {
+		fmt.Fprintf(w, "Saved %q to %s (%d bytes).\n", oneLine(file.Title), path, len(data))
+	})
+}
+
+// attachmentPath decides where a download goes. The name comes from the
+// address of the file, which the service chose, so only its last element is
+// used and it can never point out of the directory.
+func attachmentPath(out, media string) (string, error) {
+	name := "attachment"
+	if u, err := url.Parse(media); err == nil {
+		if base := filepath.Base(filepath.FromSlash(u.Path)); base != "." && base != string(filepath.Separator) && base != ".." {
+			name = base
+		}
+	}
+	if out == "" {
+		return name, nil
+	}
+	if info, err := os.Stat(out); err == nil && info.IsDir() {
+		return filepath.Join(out, name), nil
+	}
+	return out, nil
 }
 
 // respondResult is what respond prints. With DryRun set, nothing was changed

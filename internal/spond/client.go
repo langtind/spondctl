@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/langtind/ctlkit"
@@ -32,10 +33,13 @@ type Client struct {
 	UserAgent string
 	// Token is sent as a bearer token when it is set.
 	Token string
+	// MediaOrigin is where attachments are stored. Download fetches nothing
+	// from anywhere else.
+	MediaOrigin string
 }
 
 func NewClient() *Client {
-	return &Client{HTTP: httpx.NewClient(), BaseURL: "https://api.spond.com/core/v1"}
+	return &Client{HTTP: httpx.NewClient(), BaseURL: "https://api.spond.com/core/v1", MediaOrigin: "https://spond.com"}
 }
 
 // Group is a group the account belongs to, with its members.
@@ -61,15 +65,25 @@ type Person struct {
 
 // Event is what Spond calls a spond: something members are invited to.
 type Event struct {
-	ID              string    `json:"id"`
-	Heading         string    `json:"heading"`
-	Description     string    `json:"description"`
-	StartTimestamp  string    `json:"startTimestamp"`
-	EndTimestamp    string    `json:"endTimestamp"`
-	MeetupTimestamp string    `json:"meetupTimestamp"`
-	Cancelled       bool      `json:"cancelled"`
-	Location        *Location `json:"location"`
-	Responses       Responses `json:"responses"`
+	ID              string       `json:"id"`
+	Heading         string       `json:"heading"`
+	Description     string       `json:"description"`
+	StartTimestamp  string       `json:"startTimestamp"`
+	EndTimestamp    string       `json:"endTimestamp"`
+	MeetupTimestamp string       `json:"meetupTimestamp"`
+	Cancelled       bool         `json:"cancelled"`
+	Location        *Location    `json:"location"`
+	Responses       Responses    `json:"responses"`
+	Attachments     []Attachment `json:"attachments"`
+}
+
+// Attachment is a file on an event.
+type Attachment struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// Media is the address of the file.
+	Media     string `json:"media"`
+	Timestamp string `json:"timestamp"`
 }
 
 type Location struct {
@@ -145,6 +159,28 @@ func (c *Client) Event(ctx context.Context, id string) (*Event, error) {
 	query := url.Values{"includeComments": {"true"}}
 	err := c.do(ctx, http.MethodGet, "/sponds/"+url.PathEscape(id), query, nil, &event)
 	return &event, err
+}
+
+// EventRaw returns the answer to Event as the service sent it.
+func (c *Client) EventRaw(ctx context.Context, id string) ([]byte, error) {
+	var raw json.RawMessage
+	query := url.Values{"includeComments": {"true"}}
+	err := c.do(ctx, http.MethodGet, "/sponds/"+url.PathEscape(id), query, nil, &raw)
+	return raw, err
+}
+
+// Download fetches the file of an attachment. The address comes from an
+// event, which is data from the service, so it is fetched only when it lies
+// under MediaOrigin, and the token is never sent with it.
+func (c *Client) Download(ctx context.Context, media string) ([]byte, error) {
+	if !strings.HasPrefix(media, c.MediaOrigin+"/") {
+		return nil, fmt.Errorf("%s: the attachment is stored at %q, which is not under %s", service, media, c.MediaOrigin)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, media, nil)
+	if err != nil {
+		return nil, err
+	}
+	return httpx.Do(c.HTTP, req, service, c.UserAgent)
 }
 
 // ResponseRequest is the body Respond sends. A dry run prints it. The API

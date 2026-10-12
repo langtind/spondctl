@@ -2,7 +2,7 @@
 
 A command line tool for [Spond](https://spond.com), the app that sports teams and other groups use for events and attendance.
 
-spondctl lists the groups you are in, shows upcoming events and who has answered them, and accepts or declines on behalf of a member. The output is Markdown, so it reads well in a terminal and when an AI agent relays it into a chat. Every data command also prints JSON.
+spondctl lists the groups you are in, shows upcoming events and who has answered them, downloads the files attached to an event, and accepts or declines on behalf of a member. The output is Markdown, so it reads well in a terminal and when an AI agent relays it into a chat. Every data command also prints JSON.
 
 > spondctl is unofficial and not affiliated with Spond. It uses the same undocumented API as the Spond apps, so it can break when they change.
 
@@ -24,6 +24,7 @@ go install github.com/langtind/spondctl@latest
 spondctl login
 spondctl events
 spondctl event <event-id>
+spondctl attachment <event-id> <attachment-id> --out ~/Downloads
 spondctl groups
 spondctl members <group-id>
 spondctl respond <event-id> <member-id> accept --dry-run

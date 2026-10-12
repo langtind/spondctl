@@ -55,6 +55,9 @@ func (a *App) renderEvents(w io.Writer, list eventList) {
 		r := event.Responses
 		field(w, "Answers", fmt.Sprintf("%d accepted, %d declined, %d unanswered", r.Accepted, r.Declined, r.Unanswered)+
 			extra(r.Waitinglist, "on the waiting list")+extra(r.Unconfirmed, "unconfirmed"))
+		if event.Attachments > 0 {
+			field(w, "Attachments", fmt.Sprint(event.Attachments))
+		}
 		field(w, "id", event.ID)
 	}
 	if list.Truncated {
@@ -77,6 +80,14 @@ func (a *App) renderEvent(w io.Writer, event eventView) {
 
 	if text := strings.TrimSpace(event.Description); text != "" {
 		fmt.Fprintf(w, "\n## Description\n\n%s\n", text)
+	}
+
+	if len(event.Attachments) > 0 {
+		fmt.Fprintln(w, "\n## Attachments")
+		fmt.Fprintln(w)
+		for _, file := range event.Attachments {
+			fmt.Fprintf(w, "- %s (id %s)\n", orDash(file.Title), file.ID)
+		}
 	}
 
 	fmt.Fprintln(w, "\n## Answers")

@@ -6,7 +6,7 @@ The Spond API as far as it is known. Spond publishes no API. The client in `inte
 
 The requests below were read out of [Olen/Spond](https://github.com/Olen/Spond), an open Python client, at commit `51bca88` (2026-10-06). Only facts about the API were taken: paths, parameters and field names. That project is GPL-3.0 and none of its code is copied here.
 
-No request has been captured from the app yet, and no answer to a logged-in request has been seen. Until one has, everything under "Reported by others" is a lead and not a fact.
+No request has been captured from the app. The read requests have been run against a real account, see "Verified". The write request has not.
 
 ## Verified
 
@@ -18,6 +18,23 @@ Checked on 2026-10-12 with spondctl itself, without an account:
 | `GET /core/v1/groups/` with a bearer token that is not one | HTTP 401, `{"message": "Not authenticated"}` |
 
 So the base URL, the login path and the bearer scheme are right, and an error carries its text in `message`.
+
+Checked on 2026-10-12 with a real account. Only the shape is written down:
+
+| Request | What the answer showed |
+| --- | --- |
+| `POST /auth2/login` | A token in `accessToken.token`. It is long, about 700 characters |
+| `GET /groups/` | A list of groups with `id`, `name` and `members`, as reported |
+| `GET /sponds/` with `groupId`, `minEndTimestamp` and `maxStartTimestamp` at a time of day that is not midnight | Only events in the group and in the period, each with `heading`, `startTimestamp`, `endTimestamp`, `location.feature`, `location.address` and the id lists. Timestamps are RFC 3339 in UTC |
+| `GET /sponds/{id}?includeComments=true` | The fields below |
+| `GET` of an attachment's `media` address, without a token | HTTP 200, `application/pdf` |
+
+An event answers with these fields: `attachments`, `autoAccept`, `autoReminderType`, `behalfOfIds`, `comments`, `commentsDisabled`, `createdTime`, `creatorId`, `description`, `endTimestamp`, `expired`, `heading`, `hidden`, `id`, `location`, `matchEvent`, `owners`, `participantsHidden`, `picture`, `recipients`, `registered`, `responses`, `startTimestamp`, `tasks`, `type`, `updated`, `visibility`.
+
+- `responses` has the five id lists and also `participantIds`.
+- `location` has `id`, `feature`, `address`, `postalCode`, `country`, `latitude`, `longitude`, `administrativeAreaLevel1` and `administrativeAreaLevel2`.
+- `recipients` has `group`, `guardians` and `profiles`.
+- An attachment has `id`, `title`, `media`, `type` (2 for a PDF), `ownerId` and `timestamp`. `media` is an address under `https://spond.com/storage/upload/`, and the last element of its path is a file name.
 
 ## Reported by others
 
@@ -39,8 +56,6 @@ Not used by spondctl, and listed so that nobody has to look again: `GET /profile
 
 What the client assumes without having seen it:
 
-- That the timestamps in an event are RFC 3339 in UTC. `render.go` shows a value it cannot parse as it is.
-- That the query timestamps take a time of day. The Python client only ever sends midnight UTC.
 - The order of `GET /sponds/`. spondctl sorts by start time itself.
 - That `max` has no lower ceiling than 100.
 - That every invited member is in one of the five id lists. `respond` only notes it when a member is in none.
@@ -49,6 +64,6 @@ What the client assumes without having seen it:
 
 ## To verify next
 
-Log in with a real account, run each read command with `--json`, and move what the answers confirm up to "Verified". Do not paste an answer here: it holds the names of real people, most of them children. Write down the shape only.
+`respond` has never been run for real. Run it only with the consent of the member it concerns, and write down what the `PUT` answers.
 
-Run `respond` for real only with the consent of the member it concerns.
+Do not paste an answer here: it holds the names of real people, most of them children. Write down the shape only. `spondctl event <id> --raw` prints an answer as it came.

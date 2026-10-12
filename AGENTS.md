@@ -1,6 +1,6 @@
 # AGENTS.md
 
-spondctl is a Go CLI for Spond, the app that sports teams and other groups use for events and attendance. It lists groups and members, shows events and who has answered them, and accepts or declines on behalf of a member. It is built on [ctlkit](https://github.com/langtind/ctlkit) and follows its [conventions](https://github.com/langtind/ctlkit/blob/main/CONVENTIONS.md). Read them before you add a command.
+spondctl is a Go CLI for Spond, the app that sports teams and other groups use for events and attendance. It lists groups and members, shows events and who has answered them, and downloads attachments, and accepts or declines on behalf of a member. It is built on [ctlkit](https://github.com/langtind/ctlkit) and follows its [conventions](https://github.com/langtind/ctlkit/blob/main/CONVENTIONS.md). Read them before you add a command.
 
 ## Rules
 
@@ -42,6 +42,7 @@ spondctl is a Go CLI for Spond, the app that sports teams and other groups use f
 - An event holds only the ids of the invited. The names are in the groups, so `event` and `respond` also fetch `/groups/`.
 - A member id belongs to a group. It is not the id of the profile that logged in. A parent answers for a child with the child's member id.
 - `accepted` in the answer body is the text `"true"` or `"false"`.
+- An attachment has an address under `https://spond.com/storage/`, and the file is served without a token. `Client.Download` fetches nothing outside that origin and never sends the token, because the address is data from the service.
 - A token cannot be renewed. On 401 the user logs in again, and `hint` in `cli.go` says so.
 - An account with two-factor login gets a login answer without a token. That answer can hold a phone number, so it is never printed.
 - Dates on the command line are read in the user's time zone. Markdown shows times in that zone, JSON keeps them as Spond gave them.
