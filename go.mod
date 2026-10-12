@@ -2,7 +2,7 @@ module github.com/langtind/spondctl
 
 go 1.27.1
 
-require github.com/langtind/ctlkit v0.1.0
+require github.com/langtind/ctlkit v0.2.0
 
 require (
 	github.com/danieljoos/wincred v1.2.3 // indirect

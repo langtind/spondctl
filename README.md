@@ -30,13 +30,20 @@ spondctl members <group-id>
 spondctl respond <event-id> <member-id> accept --dry-run
 ```
 
-`spondctl login` asks for the email and the password and stores a token in the system keyring. The password is not stored. In a script, pipe the password in:
+`spondctl login` asks for the email and the password and stores the login in the system keyring. The password is not stored. In a script, pipe the password in:
 
 ```bash
 op read "op://vault/item/password" | spondctl login --email <email> --password-stdin
 ```
 
-Set `SPONDCTL_TOKEN` to use a token without the keyring. A token runs out after a while, and then you log in again. An account with two-factor login cannot log in this way.
+The login renews itself. An access token lasts a day and is renewed on use, and each renewal gives another 90 days. So you stay logged in for as long as spondctl is used at least once every 90 days.
+
+```bash
+spondctl status    # whether a login is stored, and how long it lasts
+spondctl refresh   # renew it now
+```
+
+Set `SPONDCTL_TOKEN` to use a token without the keyring. Such a token is not renewed and lasts a day. An account with two-factor login cannot log in this way.
 
 ### Events
 

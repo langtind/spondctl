@@ -123,6 +123,26 @@ func (a *App) renderRespond(w io.Writer, result respondResult) {
 	}
 }
 
+func (a *App) renderStatus(w io.Writer, status loginStatus) {
+	switch {
+	case !status.LoggedIn && status.Source == "":
+		fmt.Fprintf(w, "Not logged in. Run \"%s login\".\n", Name)
+	case !status.LoggedIn:
+		fmt.Fprintf(w, "The login ran out at %s. Run \"%s login\" again.\n", a.local(status.RenewableUntil), Name)
+	case status.Source == "environment":
+		fmt.Fprintf(w, "Logged in with the token in %s. It is used as it is and never renewed.\n", envToken)
+	default:
+		fmt.Fprintln(w, "Logged in.")
+		if status.AccessExpires != "" {
+			fmt.Fprintf(w, "Access token until: %s\n", a.local(status.AccessExpires))
+		}
+		if status.RenewableUntil != "" {
+			fmt.Fprintf(w, "Renews itself until: %s\n", a.local(status.RenewableUntil))
+			fmt.Fprintln(w, "Every renewal moves that date, so the login lasts as long as it is used now and then.")
+		}
+	}
+}
+
 // local shows a time from Spond in the user's zone, still as RFC 3339. A
 // value that is not a time is shown as it is.
 func (a *App) local(stamp string) string {

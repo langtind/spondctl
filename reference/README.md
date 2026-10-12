@@ -23,7 +23,8 @@ Checked on 2026-10-12 with a real account. Only the shape is written down:
 
 | Request | What the answer showed |
 | --- | --- |
-| `POST /auth2/login` | A token in `accessToken.token`. It is long, about 700 characters |
+| `POST /auth2/login` | `accessToken`, `refreshToken` and `passwordToken`, each with `token` and `expiration`. The access token lasts 24 hours, the refresh token 90 days, the password token 10 minutes. The tokens are opaque, about 530 characters, and not JWTs |
+| `POST /auth2/login/refresh` with `{"value": <refresh token>}`, no bearer token | `accessToken` and `refreshToken`, both new, with new expiry times. Run twice in a row, each time with the token the last answer gave |
 | `GET /groups/` | A list of groups with `id`, `name` and `members`, as reported |
 | `GET /sponds/` with `groupId`, `minEndTimestamp` and `maxStartTimestamp` at a time of day that is not midnight | Only events in the group and in the period, each with `heading`, `startTimestamp`, `endTimestamp`, `location.feature`, `location.address` and the id lists. Timestamps are RFC 3339 in UTC |
 | `GET /sponds/{id}?includeComments=true` | The fields below |
@@ -37,6 +38,8 @@ An event answers with these fields: `attachments`, `autoAccept`, `autoReminderTy
 - `location` has `id`, `feature`, `address`, `postalCode`, `country`, `latitude`, `longitude`, `administrativeAreaLevel1` and `administrativeAreaLevel2`.
 - `recipients` has `group`, `guardians` and `profiles`.
 - An attachment has `id`, `title`, `media`, `type` (2 for a PDF), `ownerId` and `timestamp`. `media` is an address under `https://spond.com/storage/upload/`, and the last element of its path is a file name.
+
+The renewal request was read out of Spond's own web client, `https://spond.com/client`, in the function `renewToken`. That client renews when a request is answered 401 and then sends the request again, and signs out when the renewal itself is answered 401. Other paths it has under `auth2/`: `2fa/enable`, `2fa/disable`, `2fa/verify`, `2fa/resend`, `login/create`, `login/update`, `login/verify` and `login/registerFromSpondCode`. None of them is used here.
 
 ## Reported by others
 
@@ -60,7 +63,7 @@ What the client assumes without having seen it:
 
 - That `max` has no lower ceiling than 100.
 - That every invited member is in one of the five id lists. `respond` only notes it when a member is in none.
-- How long a token lasts. There is no known way to renew one.
+- That the refresh token that was sent stops working at once. Spond's web client stores the new one every time, and spondctl does the same.
 - That the `PUT` answers the five id lists directly and not wrapped in something.
 
 ## To verify next

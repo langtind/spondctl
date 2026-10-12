@@ -15,6 +15,7 @@ import (
 
 	"github.com/langtind/ctlkit"
 	"github.com/langtind/ctlkit/httpx"
+	"github.com/langtind/ctlkit/session"
 )
 
 const (
@@ -33,6 +34,9 @@ type Client struct {
 	UserAgent string
 	// Token is sent as a bearer token when it is set.
 	Token string
+	// Renew returns a new token after the service refused Token with a 401.
+	// The request is then sent once more. Nil means a 401 is final.
+	Renew func(ctx context.Context) (string, error)
 	// MediaOrigin is where attachments are stored. Download fetches nothing
 	// from anywhere else.
 	MediaOrigin string
@@ -101,23 +105,51 @@ type Responses struct {
 	UnconfirmedIDs []string `json:"unconfirmedIds"`
 }
 
-// Login trades an email and a password for an access token. An account with
-// two-factor login gets no token this way.
-func (c *Client) Login(ctx context.Context, email, password string) (string, error) {
-	var answer struct {
-		AccessToken struct {
-			Token string `json:"token"`
-		} `json:"accessToken"`
+// tokens is what a login and a renewal answer: an access token that lasts
+// a day, and a refresh token that lasts about three months.
+type tokens struct {
+	AccessToken  timedToken `json:"accessToken"`
+	RefreshToken timedToken `json:"refreshToken"`
+}
+
+type timedToken struct {
+	Token      string    `json:"token"`
+	Expiration time.Time `json:"expiration"`
+}
+
+func (t tokens) session() session.Session {
+	return session.Session{
+		AccessToken:    t.AccessToken.Token,
+		AccessExpires:  t.AccessToken.Expiration,
+		RefreshToken:   t.RefreshToken.Token,
+		RefreshExpires: t.RefreshToken.Expiration,
 	}
+}
+
+// Login trades an email and a password for a session. An account with
+// two-factor login gets no token this way.
+func (c *Client) Login(ctx context.Context, email, password string) (session.Session, error) {
+	var answer tokens
 	body := map[string]string{"email": email, "password": password}
-	if err := c.do(ctx, http.MethodPost, "/auth2/login", nil, body, &answer); err != nil {
-		return "", err
+	if err := c.send(ctx, http.MethodPost, "/auth2/login", nil, body, &answer, false); err != nil {
+		return session.Session{}, err
 	}
 	if answer.AccessToken.Token == "" {
-		return "", ctlkit.Authf("%s gave no access token", service).
+		return session.Session{}, ctlkit.Authf("%s gave no access token", service).
 			WithHint("check the email and the password. An account with two-factor login cannot log in this way.")
 	}
-	return answer.AccessToken.Token, nil
+	return answer.session(), nil
+}
+
+// RenewSession trades a refresh token for a new session. Spond hands out a
+// new refresh token every time, and the one that was sent stops working.
+func (c *Client) RenewSession(ctx context.Context, refreshToken string) (session.Session, error) {
+	var answer tokens
+	body := map[string]string{"value": refreshToken}
+	if err := c.send(ctx, http.MethodPost, "/auth2/login/refresh", nil, body, &answer, false); err != nil {
+		return session.Session{}, err
+	}
+	return answer.session(), nil
 }
 
 // Groups lists the groups the account belongs to, with their members.
@@ -200,9 +232,24 @@ func (c *Client) Respond(ctx context.Context, eventID, memberID string, request 
 	return &responses, err
 }
 
-// do sends one request and decodes a 2xx answer into into. Any other status
-// comes back as an error with a kind, see httpx.Do.
+// do sends one request with the token and decodes a 2xx answer into into.
+// Any other status comes back as an error with a kind, see httpx.Do. When
+// the service refuses the token, the session is renewed and the request is
+// sent once more.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, into any) error {
+	err := c.send(ctx, method, path, query, body, into, true)
+	if httpx.Status(err) != http.StatusUnauthorized || c.Renew == nil {
+		return err
+	}
+	token, renewErr := c.Renew(ctx)
+	if renewErr != nil {
+		return renewErr
+	}
+	c.Token = token
+	return c.send(ctx, method, path, query, body, into, true)
+}
+
+func (c *Client) send(ctx context.Context, method, path string, query url.Values, body, into any, authorized bool) error {
 	target := c.BaseURL + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
@@ -225,7 +272,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.Token != "" {
+	if authorized && c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 

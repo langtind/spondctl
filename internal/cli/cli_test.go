@@ -16,6 +16,7 @@ import (
 	"github.com/langtind/ctlkit"
 	"github.com/langtind/ctlkit/ctltest"
 	"github.com/langtind/ctlkit/keystore"
+	"github.com/langtind/ctlkit/session"
 
 	"github.com/langtind/spondctl/internal/spond"
 )
@@ -69,7 +70,31 @@ type harness struct {
 	calls  []call
 
 	// answer is what the fake service says.
-	answer func(c call) (int, string)
+	answer  func(c call) (int, string)
+	lockDir string
+}
+
+// login stores a session with both tokens. left is how long the access
+// token has to live.
+func (h *harness) login(left time.Duration) {
+	h.t.Helper()
+	m := session.Manager{Store: h.tokens}
+	err := m.Save(session.Session{
+		AccessToken:    "old-access",
+		AccessExpires:  testTime.Add(left),
+		RefreshToken:   "old-refresh",
+		RefreshExpires: testTime.Add(30 * 24 * time.Hour),
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) stored() session.Session {
+	h.t.Helper()
+	m := session.Manager{Store: h.tokens}
+	s, _ := m.Load()
+	return s
 }
 
 var (
@@ -79,11 +104,15 @@ var (
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{t: t, tokens: &keystore.Memory{Secret: "stored-token"}, env: map[string]string{}}
+	h := &harness{t: t, tokens: &keystore.Memory{Secret: "stored-token"}, env: map[string]string{}, lockDir: t.TempDir()}
 	h.answer = func(c call) (int, string) {
 		switch {
 		case c.Method == http.MethodPost && c.Path == "/auth2/login":
-			return http.StatusOK, `{"accessToken":{"token":"new-token","expiration":"2027-01-01T00:00:00Z"}}`
+			return http.StatusOK, `{"accessToken":{"token":"new-token","expiration":"2026-10-13T13:00:00Z"},
+			  "refreshToken":{"token":"new-refresh","expiration":"2027-01-10T13:00:00Z"},"passwordToken":{"token":"not-kept","expiration":"2026-10-12T13:10:00Z"}}`
+		case c.Method == http.MethodPost && c.Path == "/auth2/login/refresh":
+			return http.StatusOK, `{"accessToken":{"token":"renewed-access","expiration":"2026-10-13T13:00:00Z"},
+			  "refreshToken":{"token":"renewed-refresh","expiration":"2027-01-10T13:00:00Z"}}`
 		case c.Method == http.MethodGet && c.Path == "/groups/":
 			return http.StatusOK, groupsBody
 		case c.Method == http.MethodGet && c.Path == "/sponds/":
@@ -107,11 +136,11 @@ func newHarness(t *testing.T) *harness {
 // server too, which is what the contract test needs.
 func (h *harness) program(baseURL string, client *http.Client) *ctlkit.Program {
 	app := &App{
-		Client: &spond.Client{HTTP: client, BaseURL: baseURL, MediaOrigin: baseURL},
-		Tokens: h.tokens,
-		Getenv: func(name string) string { return h.env[name] },
-		Now:    func() time.Time { return testTime },
-		Zone:   testZone,
+		Client:  &spond.Client{HTTP: client, BaseURL: baseURL, MediaOrigin: baseURL},
+		Session: &session.Manager{Store: h.tokens, LockPath: filepath.Join(h.lockDir, "renew.lock")},
+		Getenv:  func(name string) string { return h.env[name] },
+		Now:     func() time.Time { return testTime },
+		Zone:    testZone,
 	}
 	return app.program(ctlkit.Build{Version: "1.2.3"}, os.DirFS("../../skills/"+Name))
 }
@@ -350,8 +379,11 @@ func TestAttachmentFetchesOnlyFromSpond(t *testing.T) {
 
 	// A name that climbs out of the directory is not used.
 	h.run("", "attachment", "E3", "A3", "--out", dir)
-	if entries, _ := os.ReadDir(filepath.Dir(dir)); len(entries) != 1 {
-		t.Errorf("something was written beside the directory: %v", entries)
+	entries, _ := os.ReadDir(filepath.Dir(dir))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			t.Errorf("%s was written beside the directory", entry.Name())
+		}
 	}
 
 	code, _, stderr = h.run("", "attachment", "E3", "A9", "--out", dir)
@@ -432,12 +464,122 @@ func TestWithoutATokenNothingIsSent(t *testing.T) {
 	}
 }
 
-func TestATokenThatHasRunOutSaysToLogInAgain(t *testing.T) {
+func TestAnAccessTokenAboutToRunOutIsRenewedFirst(t *testing.T) {
 	h := newHarness(t)
+	h.login(2 * time.Minute)
+	code, _, stderr := h.run("", "groups")
+	if code != 0 || h.sent() != "POST /auth2/login/refresh, GET /groups/" {
+		t.Fatalf("exit = %d, stderr = %q, sent = %s", code, stderr, h.sent())
+	}
+	renewal, request := h.calls[0], h.calls[1]
+	if renewal.Body != `{"value":"old-refresh"}` || renewal.Token != "" || request.Token != "renewed-access" {
+		t.Errorf("renewal body = %s, renewal token = %q, request token = %q", renewal.Body, renewal.Token, request.Token)
+	}
+	// Spond takes a refresh token once, so the new pair has to be stored.
+	if got := h.stored(); got.AccessToken != "renewed-access" || got.RefreshToken != "renewed-refresh" || got.RefreshExpires.Format(time.RFC3339) != "2027-01-10T13:00:00Z" {
+		t.Errorf("stored = %+v", got)
+	}
+
+	// The next run finds a token that is good and renews nothing.
+	if h.run("", "groups"); h.sent() != "GET /groups/" {
+		t.Errorf("second run sent = %s", h.sent())
+	}
+}
+
+func TestATokenThatSpondRefusesIsRenewedAndTheRequestSentAgain(t *testing.T) {
+	h := newHarness(t)
+	h.login(12 * time.Hour)
+	normal := h.answer
+	h.answer = func(c call) (int, string) {
+		if c.Token == "old-access" {
+			return http.StatusUnauthorized, `{"message":"Not authenticated"}`
+		}
+		return normal(c)
+	}
+	code, stdout, stderr := h.run("", "groups")
+	if code != 0 || !strings.HasPrefix(stdout, "# Groups") || h.sent() != "GET /groups/, POST /auth2/login/refresh, GET /groups/" {
+		t.Errorf("exit = %d, stderr = %q, sent = %s", code, stderr, h.sent())
+	}
+}
+
+func TestALoginThatCannotBeRenewedSaysToLogInAgain(t *testing.T) {
+	h := newHarness(t)
+	h.login(-time.Hour)
 	h.answer = func(call) (int, string) { return http.StatusUnauthorized, `` }
 	code, _, stderr := h.run("", "groups")
-	if code != 4 || stderr != "Error: Spond: HTTP 401\nHint: the token may have run out. Run \"spondctl login\" again.\n" {
+	if code != 4 || stderr != "Error: the login has run out: Spond: HTTP 401\nHint: run \"spondctl login\" again.\n" || h.sent() != "POST /auth2/login/refresh" {
+		t.Errorf("refused renewal: exit = %d, stderr = %q, sent = %s", code, stderr, h.sent())
+	}
+	if h.stored().RefreshToken != "old-refresh" {
+		t.Errorf("the stored login was changed: %+v", h.stored())
+	}
+
+	// A token without a refresh token, as SPONDCTL_TOKEN and older versions have.
+	h.tokens.Secret = "stored-token"
+	code, _, stderr = h.run("", "groups")
+	if code != 4 || stderr != "Error: the login has run out\nHint: run \"spondctl login\" again.\n" || h.sent() != "GET /groups/" {
+		t.Errorf("bare token: exit = %d, stderr = %q, sent = %s", code, stderr, h.sent())
+	}
+
+	h.env[envToken] = "env-token"
+	code, _, stderr = h.run("", "groups")
+	if code != 4 || stderr != "Error: Spond: HTTP 401\nHint: run \"spondctl login\" again.\n" {
+		t.Errorf("token from the environment: exit = %d, stderr = %q", code, stderr)
+	}
+}
+
+func TestAServiceThatIsDownDoesNotEndTheLogin(t *testing.T) {
+	h := newHarness(t)
+	h.login(-time.Hour)
+	h.answer = func(call) (int, string) { return http.StatusServiceUnavailable, `` }
+	code, _, stderr := h.run("", "groups")
+	if code != 7 || !strings.Contains(stderr, "renew the login: Spond: HTTP 503") || strings.Contains(stderr, "run out") {
 		t.Errorf("exit = %d, stderr = %q", code, stderr)
+	}
+}
+
+func TestStatusSaysHowLongTheLoginLasts(t *testing.T) {
+	h := newHarness(t)
+	h.login(12 * time.Hour)
+	code, stdout, _ := h.run("", "status")
+	want := "Logged in.\nAccess token until: 2026-10-13T03:00:00+02:00\nRenews itself until: 2026-11-11T15:00:00+02:00\n" +
+		"Every renewal moves that date, so the login lasts as long as it is used now and then.\n"
+	if code != 0 || stdout != want || len(h.calls) != 0 {
+		t.Errorf("exit = %d, sent = %s, stdout:\n%s", code, h.sent(), stdout)
+	}
+
+	_, stdout, _ = h.run("", "status", "--json")
+	var status loginStatus
+	ctltest.OneJSON(t, stdout, &status)
+	if !status.LoggedIn || status.Source != "keyring" || status.AccessExpires != "2026-10-13T01:00:00Z" || status.RenewableUntil != "2026-11-11T13:00:00Z" {
+		t.Errorf("status = %+v", status)
+	}
+
+	h.tokens.Secret = ""
+	code, stdout, _ = h.run("", "status")
+	if code != 0 || stdout != "Not logged in. Run \"spondctl login\".\n" {
+		t.Errorf("not logged in: exit = %d, stdout = %q", code, stdout)
+	}
+
+	h.env[envToken] = "env-token"
+	if _, stdout, _ = h.run("", "status"); !strings.Contains(stdout, "never renewed") {
+		t.Errorf("token from the environment: %q", stdout)
+	}
+}
+
+func TestRefreshRenewsNow(t *testing.T) {
+	h := newHarness(t)
+	h.login(12 * time.Hour)
+	code, stdout, stderr := h.run("", "refresh", "--json")
+	var status loginStatus
+	ctltest.OneJSON(t, stdout, &status)
+	if code != 0 || h.sent() != "POST /auth2/login/refresh" || status.RenewableUntil != "2027-01-10T13:00:00Z" || h.stored().AccessToken != "renewed-access" {
+		t.Errorf("exit = %d, stderr = %q, sent = %s, status = %+v", code, stderr, h.sent(), status)
+	}
+
+	h.tokens.Secret = ""
+	if code, _, stderr := h.run("", "refresh"); code != 4 || !strings.Contains(stderr, "not logged in") {
+		t.Errorf("not logged in: exit = %d, stderr = %q", code, stderr)
 	}
 }
 
@@ -445,8 +587,10 @@ func TestLoginStoresTheToken(t *testing.T) {
 	h := newHarness(t)
 	h.tokens.Secret = ""
 	code, stdout, stderr := h.run("hunter2\n", "login", "--email", "kari@example.invalid", "--password-stdin")
-	if code != 0 || stdout != "Logged in. The token is in the system keyring.\n" || h.tokens.Secret != "new-token" || h.calls[0].Token != "" {
-		t.Errorf("exit = %d, stdout = %q, stderr = %q, token = %q", code, stdout, stderr, h.tokens.Secret)
+	want := "Logged in. The login is in the system keyring.\nIt renews itself, and lasts until 2027-01-10 if spondctl is not used before then.\n"
+	got := h.stored()
+	if code != 0 || stdout != want || got.AccessToken != "new-token" || got.RefreshToken != "new-refresh" || h.calls[0].Token != "" || strings.Contains(h.tokens.Secret, "not-kept") {
+		t.Errorf("exit = %d, stdout = %q, stderr = %q, stored = %+v", code, stdout, stderr, got)
 	}
 	var body map[string]string
 	if err := json.Unmarshal([]byte(h.calls[0].Body), &body); err != nil || body["email"] != "kari@example.invalid" || body["password"] != "hunter2" {

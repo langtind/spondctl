@@ -78,7 +78,7 @@ The exit code says what kind of failure it was, and with `--json` the error is a
 | 6 | `rate_limit` | Wait the time the error names, then try once more |
 | 7 | `unavailable` | Try once more later |
 
-A token runs out after a while, and then every command exits 4 until the user logs in again.
+The login renews itself, so exit 4 is rare. `spondctl status` says whether a login is stored and when it has to be renewed by, without calling Spond. It lasts 90 days from the last renewal. When a command does exit 4 with "the login has run out", only the user can fix it, by running `spondctl login`.
 
 ## Rules
 

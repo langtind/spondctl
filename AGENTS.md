@@ -16,7 +16,7 @@ spondctl is a Go CLI for Spond, the app that sports teams and other groups use f
 
 - `main.go` wires version info and the embedded skill into `internal/cli`.
 - `internal/cli` holds the commands.
-  - `cli.go` holds `App`, which carries the client, the token store, the clock and the time zone, and `authorize`.
+  - `cli.go` holds `App`, which carries the client, the login, the clock and the time zone, and `authorize`, which gives the client a token and renews the login when it has to.
   - `commands.go` holds the command table and the command functions. Add a command or a flag in the table and nowhere else. ctlkit parses flags from it, prints help from it, and publishes it with `schema`.
   - `render.go` holds the Markdown output.
 - `internal/spond` is the API client. `httpx.Do` turns a status outside 2xx into an error with a kind.
@@ -44,7 +44,8 @@ spondctl is a Go CLI for Spond, the app that sports teams and other groups use f
 - `accepted` in the answer body is the text `"true"` or `"false"`.
 - An attachment has an address under `https://spond.com/storage/`, and the file is served without a token. `Client.Download` fetches nothing outside that origin and never sends the token, because the address is data from the service.
 - `GET /sponds/` answers the latest event first unless `order=asc` is sent. The client always sends it.
-- A token cannot be renewed. On 401 the user logs in again, and `hint` in `cli.go` says so.
+- A login gives an access token for 24 hours and a refresh token for 90 days. `POST /auth2/login/refresh` with `{"value": <refresh token>}` gives a new pair, and the refresh token that was sent stops working. `session.Manager` from ctlkit stores the pair and renews it under a lock. Without the lock, two runs at the same time would log each other out.
+- The client renews and sends the request once more when Spond answers 401, as Spond's own web client does.
 - An account with two-factor login gets a login answer without a token. That answer can hold a phone number, so it is never printed.
 - Dates on the command line are read in the user's time zone. Markdown shows times in that zone, JSON keeps them as Spond gave them.
 

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/langtind/ctlkit"
+	"github.com/langtind/ctlkit/session"
 
 	"github.com/langtind/spondctl/internal/spond"
 )
@@ -29,7 +31,7 @@ func (a *App) commands() []ctlkit.Command {
 	return []ctlkit.Command{
 		{
 			Name:    "login",
-			Summary: "Log in and store the token in the system keyring",
+			Summary: "Log in and store the login in the system keyring",
 			Flags: []ctlkit.Flag{
 				{Name: "email", Kind: ctlkit.String, Value: "email", Help: "the email of the Spond account"},
 				{Name: "password-stdin", Kind: ctlkit.Bool, Help: "read the password from stdin instead of prompting"},
@@ -38,8 +40,20 @@ func (a *App) commands() []ctlkit.Command {
 		},
 		{
 			Name:    "logout",
-			Summary: "Remove the stored token",
+			Summary: "Remove the stored login",
 			Run:     a.logout,
+		},
+		{
+			Name:    "status",
+			Summary: "Show whether a login is stored and how long it lasts, without calling Spond",
+			Flags:   []ctlkit.Flag{ctlkit.JSONFlag},
+			Run:     a.status,
+		},
+		{
+			Name:    "refresh",
+			Summary: "Renew the stored login now",
+			Flags:   []ctlkit.Flag{ctlkit.JSONFlag},
+			Run:     a.refresh,
 		},
 		{
 			Name:    "groups",
@@ -124,32 +138,94 @@ func (a *App) login(ctx context.Context, c *ctlkit.Call) error {
 		return err
 	}
 
-	token, err := a.Client.Login(ctx, email, password)
+	login, err := a.Client.Login(ctx, email, password)
 	if err != nil {
 		if ctlkit.KindOf(err) == ctlkit.KindAuth {
 			return ctlkit.Authf("%w", err).WithHint("check the email and the password. An account with two-factor login cannot log in this way.")
 		}
 		return err
 	}
-	if err := a.Tokens.Set(token); err != nil {
-		return fmt.Errorf("store token in keyring: %w", err)
+	if err := a.Session.Save(login); err != nil {
+		return fmt.Errorf("store the login in the keyring: %w", err)
 	}
 	if a.Getenv(envToken) != "" {
-		c.Note("%s is set and takes precedence over the stored token.", envToken)
+		c.Note("%s is set and takes precedence over the stored login.", envToken)
 	}
-	fmt.Fprintln(c.Stdout, "Logged in. The token is in the system keyring.")
+	fmt.Fprintln(c.Stdout, "Logged in. The login is in the system keyring.")
+	if !login.RefreshExpires.IsZero() {
+		fmt.Fprintf(c.Stdout, "It renews itself, and lasts until %s if %s is not used before then.\n", login.RefreshExpires.In(a.Zone).Format(dateLayout), Name)
+	}
 	return nil
 }
 
 func (a *App) logout(ctx context.Context, c *ctlkit.Call) error {
-	if err := a.Tokens.Delete(); err != nil {
-		return fmt.Errorf("remove token from keyring: %w", err)
+	if err := a.Session.Clear(); err != nil {
+		return fmt.Errorf("remove the login from the keyring: %w", err)
 	}
 	if a.Getenv(envToken) != "" {
 		c.Note("%s is still set and keeps working.", envToken)
 	}
-	fmt.Fprintln(c.Stdout, "Removed the stored token.")
+	fmt.Fprintln(c.Stdout, "Removed the stored login.")
 	return nil
+}
+
+// loginStatus is what status and refresh print.
+type loginStatus struct {
+	LoggedIn bool `json:"loggedIn"`
+	// Source is "keyring", or "environment" when the variable is set.
+	Source string `json:"source,omitempty"`
+	// AccessExpires is when the access token runs out. It is renewed
+	// before then, as long as RenewableUntil has not passed.
+	AccessExpires string `json:"accessExpires,omitempty"`
+	// RenewableUntil is when the user has to log in again unless the login
+	// is renewed first. Every renewal moves it.
+	RenewableUntil string `json:"renewableUntil,omitempty"`
+}
+
+func (a *App) loginStatus() (loginStatus, error) {
+	if strings.TrimSpace(a.Getenv(envToken)) != "" {
+		return loginStatus{LoggedIn: true, Source: "environment"}, nil
+	}
+	login, err := a.Session.Load()
+	if errors.Is(err, session.ErrNotLoggedIn) {
+		return loginStatus{}, nil
+	}
+	if err != nil {
+		return loginStatus{}, err
+	}
+	stamp := func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.UTC().Format(time.RFC3339)
+	}
+	status := loginStatus{Source: "keyring", AccessExpires: stamp(login.AccessExpires), RenewableUntil: stamp(login.RefreshExpires)}
+	now := a.Now()
+	status.LoggedIn = login.AccessExpires.IsZero() || now.Before(login.AccessExpires) ||
+		(login.RefreshToken != "" && (login.RefreshExpires.IsZero() || now.Before(login.RefreshExpires)))
+	return status, nil
+}
+
+func (a *App) status(ctx context.Context, c *ctlkit.Call) error {
+	status, err := a.loginStatus()
+	if err != nil {
+		return err
+	}
+	return c.Print(status, func(w io.Writer) { a.renderStatus(w, status) })
+}
+
+func (a *App) refresh(ctx context.Context, c *ctlkit.Call) error {
+	if strings.TrimSpace(a.Getenv(envToken)) != "" {
+		return ctlkit.Usagef("%s is set, and a token from the environment cannot be renewed", envToken)
+	}
+	login, err := a.Session.Load()
+	if err != nil {
+		return loginError(err)
+	}
+	if _, err := a.Session.Refresh(ctx, login.AccessToken); err != nil {
+		return loginError(err)
+	}
+	return a.status(ctx, c)
 }
 
 // groupSummary is one group in the list.
@@ -160,7 +236,7 @@ type groupSummary struct {
 }
 
 func (a *App) groups(ctx context.Context, c *ctlkit.Call) error {
-	if err := a.authorize(); err != nil {
+	if err := a.authorize(ctx); err != nil {
 		return err
 	}
 	groups, err := a.Client.Groups(ctx)
@@ -187,7 +263,7 @@ type memberView struct {
 }
 
 func (a *App) members(ctx context.Context, c *ctlkit.Call) error {
-	if err := a.authorize(); err != nil {
+	if err := a.authorize(ctx); err != nil {
 		return err
 	}
 	groups, err := a.Client.Groups(ctx)
@@ -317,7 +393,7 @@ func (a *App) events(ctx context.Context, c *ctlkit.Call) error {
 		query.StartsBefore = to.AddDate(0, 0, 1)
 	}
 
-	if err := a.authorize(); err != nil {
+	if err := a.authorize(ctx); err != nil {
 		return err
 	}
 	// One more than asked for tells whether the list was cut off.
@@ -386,7 +462,7 @@ func people(ids []string, names map[string]string) []person {
 }
 
 func (a *App) event(ctx context.Context, c *ctlkit.Call) error {
-	if err := a.authorize(); err != nil {
+	if err := a.authorize(ctx); err != nil {
 		return err
 	}
 	if c.Bool("raw") {
@@ -442,7 +518,7 @@ type attachmentResult struct {
 }
 
 func (a *App) attachment(ctx context.Context, c *ctlkit.Call) error {
-	if err := a.authorize(); err != nil {
+	if err := a.authorize(ctx); err != nil {
 		return err
 	}
 	event, err := a.Client.Event(ctx, c.Arg(0))
@@ -523,7 +599,7 @@ func (a *App) respond(ctx context.Context, c *ctlkit.Call) error {
 	if answer == "accept" {
 		accepted = "true"
 	}
-	if err := a.authorize(); err != nil {
+	if err := a.authorize(ctx); err != nil {
 		return err
 	}
 
